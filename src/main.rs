@@ -1,26 +1,27 @@
 use axum::{Json, Router};
-use serde::{Deserialize};
+use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqlitePoolOptions;
 use std::net::SocketAddr;
-use sqlx::SqlitePool;
+use sqlx::{FromRow, SqlitePool};
 use tower_http::trace::TraceLayer;
 use anyhow::Result;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::routing::post;
+use axum::routing::{get, post};
+
 
 static  DATABASE_URL:&str ="sqlite://app.db";
 #[derive(Clone)]
 pub struct AppState {
     pub db: SqlitePool,
 }
-#[derive(Deserialize)]
+#[derive(Debug, Serialize, Deserialize, FromRow)]
 pub struct Device{
     pub id:i64,
     pub name: String,
     pub uuid:String,
 }
-#[derive(Deserialize)]
+#[derive(Debug, Serialize, Deserialize, FromRow)]
 pub struct Log{
     pub id:i64,
     pub device_id:i64,
@@ -73,7 +74,6 @@ pub struct LogPayload {
 }
 
 
-
 pub async fn upload_logs(State(state): State<AppState>, Json(payload): Json<LogPayload>)->Result<StatusCode, (StatusCode, String)>{
     let db = &state.db;
     let  device= payload.device;
@@ -109,6 +109,41 @@ pub fn internal_error<E: std::fmt::Display>(err: E) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
 }
 
+pub async fn get_devices(State(state): State<AppState>)->Result<(StatusCode, Json<Vec<Device>>), (StatusCode, String)>{
+    let db = &state.db;
+    let devices:Vec<Device> = sqlx::query_as("select * from devices").fetch_all(db).await.map_err(internal_error)?;
+    Ok((StatusCode::FOUND, Json(devices)))
+}
+pub async fn get_device_logs(
+    State(state): State<AppState>,
+    Path(device_id): Path<i64>,
+) -> Result<(StatusCode, Json<Vec<Log>>), (StatusCode, String)> {
+    let exists: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM devices WHERE id = ?",
+    )
+        .bind(device_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal_error)?;
+
+    if exists.is_none() {
+        return Err((StatusCode::NOT_FOUND, "device not found".to_string()));
+    }
+
+    let logs: Vec<Log> = sqlx::query_as::<_, Log>(
+        "SELECT id, device_id, app, timestamp, duration
+         FROM logs
+         WHERE device_id = ?",
+    )
+        .bind(device_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(internal_error)?;
+
+    Ok((StatusCode::OK, Json(logs)))
+}
+
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
@@ -119,6 +154,8 @@ async fn main() -> Result<()> {
     check_state(&db).await?;
     let app = Router::new()
         .route("/upload_logs", post(upload_logs))
+        .route("/devices", get(get_devices))
+        .route("/devices/{device_id}", get(get_device_logs))
         .layer(TraceLayer::new_for_http())
         .with_state(AppState { db });
 
