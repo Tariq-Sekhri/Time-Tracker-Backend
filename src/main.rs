@@ -7,7 +7,7 @@ use tower_http::trace::TraceLayer;
 use anyhow::Result;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 
 
 static  DATABASE_URL:&str ="sqlite://app.db";
@@ -148,13 +148,11 @@ async fn check() -> &'static str {
 }
 
 
-// delete device/device_id/logs
-// payloa json logs
+
 async fn delete_logs_by_ids(State(state):State<AppState>,device_id: Path<i64>, Json(ids):Json<Vec<i64>>)->Result<StatusCode, (StatusCode, String)>{
     let mut tx = state.db.begin().await.map_err(internal_error)?;
     for id in ids{
         sqlx::query("DELETE FROM logs WHERE id = ? and device_id = ?").bind(id).bind(*device_id).execute(&mut *tx).await.map_err(internal_error)?;
-
     }
     tx.commit().await.map_err(internal_error)?;
     Ok(StatusCode::OK)
@@ -174,6 +172,7 @@ async fn main() -> Result<()> {
         .route("/upload_logs", post(upload_logs))
         .route("/devices", get(get_devices))
         .route("/devices/{device_id}", get(get_device_logs))
+        .route("/devices/{device_id}/logs", delete(delete_logs_by_ids))
         .layer(TraceLayer::new_for_http())
         .with_state(AppState { db });
     let app = Router::new().nest("/v1", app_v1);
