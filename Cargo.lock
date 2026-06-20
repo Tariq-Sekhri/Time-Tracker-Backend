@@ -8,7 +8,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
- "dotenvy",
  "serde",
  "sqlx",
  "tokio",
