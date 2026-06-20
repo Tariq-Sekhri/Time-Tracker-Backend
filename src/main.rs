@@ -143,6 +143,23 @@ pub async fn get_device_logs(
     Ok((StatusCode::OK, Json(logs)))
 }
 
+async fn check() -> &'static str {
+    "Time Tracker Backend v1"
+}
+
+
+// delete device/device_id/logs
+// payloa json logs
+async fn delete_logs_by_ids(State(state):State<AppState>,device_id: Path<i64>, Json(ids):Json<Vec<i64>>)->Result<StatusCode, (StatusCode, String)>{
+    let mut tx = state.db.begin().await.map_err(internal_error)?;
+    for id in ids{
+        sqlx::query("DELETE FROM logs WHERE id = ? and device_id = ?").bind(id).bind(*device_id).execute(&mut *tx).await.map_err(internal_error)?;
+
+    }
+    tx.commit().await.map_err(internal_error)?;
+    Ok(StatusCode::OK)
+
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -152,14 +169,15 @@ async fn main() -> Result<()> {
         .connect(DATABASE_URL)
         .await?;
     check_state(&db).await?;
-    let app = Router::new()
+    let app_v1= Router::new()
+        .route("/check", get(check))
         .route("/upload_logs", post(upload_logs))
         .route("/devices", get(get_devices))
         .route("/devices/{device_id}", get(get_device_logs))
         .layer(TraceLayer::new_for_http())
         .with_state(AppState { db });
-
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    let app = Router::new().nest("/v1", app_v1);
+    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     println!("Starting Server on {}", addr);
