@@ -1,7 +1,8 @@
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::net::SocketAddr;
+use std::str::FromStr;
 use sqlx::{FromRow, SqlitePool};
 use tower_http::trace::TraceLayer;
 use anyhow::Result;
@@ -10,7 +11,7 @@ use axum::http::StatusCode;
 use axum::routing::{delete, get, post};
 
 
-static  DATABASE_URL:&str ="sqlite://app.db";
+static  DATABASE_URL:&str ="sqlite://server.db";
 #[derive(Clone)]
 pub struct AppState {
     pub db: SqlitePool,
@@ -22,9 +23,22 @@ pub struct Device{
     pub uuid:String,
 }
 #[derive(Debug, Serialize, Deserialize, FromRow)]
+
+pub struct NewDevice{
+    pub name: String,
+    pub uuid:String,
+}
+#[derive(Debug, Serialize, Deserialize, FromRow)]
 pub struct Log{
     pub id:i64,
     pub device_id:i64,
+    pub app:String,
+    pub timestamp:i64,
+    pub duration:i64,
+}
+#[derive(Debug, Deserialize)]
+pub struct UploadedLog{
+    pub id:i64,
     pub app:String,
     pub timestamp:i64,
     pub duration:i64,
@@ -69,8 +83,8 @@ async fn check_state(pool: &SqlitePool)->Result<()>{
 
 #[derive(Deserialize)]
 pub struct LogPayload {
-    pub device:Device,
-    pub logs:Vec<Log>,
+    pub device:NewDevice,
+    pub logs:Vec<UploadedLog>,
 }
 
 
@@ -79,7 +93,12 @@ pub async fn upload_logs(State(state): State<AppState>, Json(payload): Json<LogP
     let  device= payload.device;
     let  logs= payload.logs;
 
-    sqlx::query("INSERT OR IGNORE INTO devices (id, name, uuid) VALUES (?, ?, ?)").bind(device.id).bind( device.name.clone()).bind(device.uuid.clone()).execute(db).await.map_err(internal_error)?;
+    sqlx::query("INSERT OR IGNORE INTO devices (name, uuid) VALUES (?, ?)").bind( device.name.clone()).bind(device.uuid.clone()).execute(db).await.map_err(internal_error)?;
+    let device_id: i64 = sqlx::query_scalar("SELECT id FROM devices WHERE uuid = ?")
+        .bind(device.uuid)
+        .fetch_one(db)
+        .await
+        .map_err(internal_error)?;
     let mut tx = state.db.begin().await.map_err(internal_error)?;
 
     for log in logs {
@@ -89,7 +108,7 @@ pub async fn upload_logs(State(state): State<AppState>, Json(payload): Json<LogP
          VALUES (?, ?, ?, ?, ?)",
         )
             .bind(log.id)
-            .bind(log.device_id)
+            .bind(device_id)
             .bind(log.app)
             .bind(log.timestamp)
             .bind(log.duration)
@@ -149,10 +168,21 @@ async fn check() -> &'static str {
 
 
 
-async fn delete_logs_by_ids(State(state):State<AppState>,device_id: Path<i64>, Json(ids):Json<Vec<i64>>)->Result<StatusCode, (StatusCode, String)>{
+async fn delete_logs_by_ids(State(state):State<AppState>,device_ref: Path<String>, Json(ids):Json<Vec<i64>>)->Result<StatusCode, (StatusCode, String)>{
+    let device_ref = device_ref.as_str();
+    let device_id: i64 = if let Ok(id) = device_ref.parse() {
+        id
+    } else {
+        sqlx::query_scalar("SELECT id FROM devices WHERE uuid = ?")
+            .bind(device_ref)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(internal_error)?
+            .ok_or((StatusCode::NOT_FOUND, "device not found".to_string()))?
+    };
     let mut tx = state.db.begin().await.map_err(internal_error)?;
     for id in ids{
-        sqlx::query("DELETE FROM logs WHERE id = ? and device_id = ?").bind(id).bind(*device_id).execute(&mut *tx).await.map_err(internal_error)?;
+        sqlx::query("DELETE FROM logs WHERE id = ? and device_id = ?").bind(id).bind(device_id).execute(&mut *tx).await.map_err(internal_error)?;
     }
     tx.commit().await.map_err(internal_error)?;
     Ok(StatusCode::OK)
@@ -162,9 +192,11 @@ async fn delete_logs_by_ids(State(state):State<AppState>,device_id: Path<i64>, J
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
+    let db_options = SqliteConnectOptions::from_str(DATABASE_URL)?
+        .create_if_missing(true);
     let db = SqlitePoolOptions::new()
         .max_connections(10)
-        .connect(DATABASE_URL)
+        .connect_with(db_options)
         .await?;
     check_state(&db).await?;
     let app_v1= Router::new()
