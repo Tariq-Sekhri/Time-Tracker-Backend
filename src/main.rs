@@ -6,10 +6,10 @@ use std::str::FromStr;
 use sqlx::{FromRow, SqlitePool};
 use tower_http::trace::TraceLayer;
 use anyhow::Result;
-use axum::extract::{Path, State};
+use axum::extract::{Path, State ,DefaultBodyLimit,};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post};
-
+use tower_http::cors::{Any, CorsLayer};
 
 static  DATABASE_URL:&str ="sqlite://server.db";
 #[derive(Clone)]
@@ -74,7 +74,6 @@ pub async fn create_log_table(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 }
 
 async fn check_state(pool: &SqlitePool)->Result<()>{
-    // create tables
     create_log_table(pool).await?;
     create_devices_table(pool).await?;
 
@@ -119,7 +118,7 @@ pub async fn upload_logs(State(state): State<AppState>, Json(payload): Json<LogP
     tx.commit().await.map_err(internal_error)?;
 
 
-    Ok(StatusCode::CREATED)
+    Ok(StatusCode::OK)
 
 
 }
@@ -131,7 +130,7 @@ pub fn internal_error<E: std::fmt::Display>(err: E) -> (StatusCode, String) {
 pub async fn get_devices(State(state): State<AppState>)->Result<(StatusCode, Json<Vec<Device>>), (StatusCode, String)>{
     let db = &state.db;
     let devices:Vec<Device> = sqlx::query_as("select * from devices").fetch_all(db).await.map_err(internal_error)?;
-    Ok((StatusCode::FOUND, Json(devices)))
+    Ok((StatusCode::OK, Json(devices)))
 }
 pub async fn get_device_logs(
     State(state): State<AppState>,
@@ -191,13 +190,18 @@ async fn delete_logs_by_ids(State(state):State<AppState>,device_ref: Path<String
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
     tracing_subscriber::fmt::init();
     let db_options = SqliteConnectOptions::from_str(DATABASE_URL)?
         .create_if_missing(true);
     let db = SqlitePoolOptions::new()
         .max_connections(10)
         .connect_with(db_options)
-        .await?;
+        .await?; 
     check_state(&db).await?;
     let app_v1= Router::new()
         .route("/check", get(check))
@@ -205,7 +209,10 @@ async fn main() -> Result<()> {
         .route("/devices", get(get_devices))
         .route("/devices/{device_id}", get(get_device_logs))
         .route("/devices/{device_id}/logs", delete(delete_logs_by_ids))
+        .layer(cors)
         .layer(TraceLayer::new_for_http())
+        //50 MB
+        .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
         .with_state(AppState { db });
     let app = Router::new().nest("/v1", app_v1);
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
