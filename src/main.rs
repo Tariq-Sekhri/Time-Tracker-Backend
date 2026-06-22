@@ -1,6 +1,6 @@
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteQueryResult};
 use std::net::SocketAddr;
 use std::str::FromStr;
 use sqlx::{FromRow, SqlitePool};
@@ -17,28 +17,15 @@ pub struct AppState {
     pub db: SqlitePool,
 }
 #[derive(Debug, Serialize, Deserialize, FromRow)]
-pub struct Device{
-    pub id:i64,
+pub struct Device {
     pub name: String,
-    pub uuid:String,
+    pub uuid: String,
 }
-#[derive(Debug, Serialize, Deserialize, FromRow)]
 
-pub struct NewDevice{
-    pub name: String,
-    pub uuid:String,
-}
 #[derive(Debug, Serialize, Deserialize, FromRow)]
 pub struct Log{
     pub id:i64,
-    pub device_id:i64,
-    pub app:String,
-    pub timestamp:i64,
-    pub duration:i64,
-}
-#[derive(Debug, Deserialize)]
-pub struct UploadedLog{
-    pub id:i64,
+    pub device_uuid:String,
     pub app:String,
     pub timestamp:i64,
     pub duration:i64,
@@ -47,7 +34,6 @@ pub struct UploadedLog{
 pub async fn create_devices_table(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS devices (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
             uuid TEXT NOT NULL UNIQUE,
             name TEXT NOT NULL
         )",
@@ -62,7 +48,7 @@ pub async fn create_log_table(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        device_id INTEGER NOT NULL DEFAULT 0,
+        device_uuid TEXT NOT NULL,
         app TEXT NOT NULL,
         timestamp INTEGER NOT NULL,
         duration INTEGER NOT NULL DEFAULT 0
@@ -82,8 +68,8 @@ async fn check_state(pool: &SqlitePool)->Result<()>{
 
 #[derive(Deserialize)]
 pub struct LogPayload {
-    pub device:NewDevice,
-    pub logs:Vec<UploadedLog>,
+    pub device:Device,
+    pub logs:Vec<Log>,
 }
 
 
@@ -92,22 +78,18 @@ pub async fn upload_logs(State(state): State<AppState>, Json(payload): Json<LogP
     let  device= payload.device;
     let  logs= payload.logs;
 
-    sqlx::query("INSERT OR IGNORE INTO devices (name, uuid) VALUES (?, ?)").bind( device.name.clone()).bind(device.uuid.clone()).execute(db).await.map_err(internal_error)?;
-    let device_id: i64 = sqlx::query_scalar("SELECT id FROM devices WHERE uuid = ?")
-        .bind(device.uuid)
-        .fetch_one(db)
-        .await
-        .map_err(internal_error)?;
-    let mut tx = state.db.begin().await.map_err(internal_error)?;
+     let a = sqlx::query("INSERT OR IGNORE INTO devices (name, uuid) VALUES (?, ?)").bind( device.name.clone()).bind(device.uuid.clone()).execute(db).await.map_err(internal_error)?;
 
+    let mut tx = state.db.begin().await.map_err(internal_error)?;
+    let logs_len = logs.len().clone();
     for log in logs {
         sqlx::query(
             "INSERT OR IGNORE INTO logs
-         (id, device_id, app, timestamp, duration)
+         (id, device_uuid, app, timestamp, duration)
          VALUES (?, ?, ?, ?, ?)",
         )
             .bind(log.id)
-            .bind(device_id)
+            .bind(&device.uuid)
             .bind(log.app)
             .bind(log.timestamp)
             .bind(log.duration)
@@ -117,10 +99,8 @@ pub async fn upload_logs(State(state): State<AppState>, Json(payload): Json<LogP
 
     tx.commit().await.map_err(internal_error)?;
 
-
+    println!("Device: {} Added {} logs", device.uuid , logs_len);
     Ok(StatusCode::OK)
-
-
 }
 
 pub fn internal_error<E: std::fmt::Display>(err: E) -> (StatusCode, String) {
@@ -134,12 +114,12 @@ pub async fn get_devices(State(state): State<AppState>)->Result<(StatusCode, Jso
 }
 pub async fn get_device_logs(
     State(state): State<AppState>,
-    Path(device_id): Path<i64>,
+    Path(device_uuid): Path<String>,
 ) -> Result<(StatusCode, Json<Vec<Log>>), (StatusCode, String)> {
-    let exists: Option<i64> = sqlx::query_scalar(
-        "SELECT id FROM devices WHERE id = ?",
+    let exists: Option<String> = sqlx::query_scalar(
+        "SELECT uuid FROM devices WHERE uuid = ?",
     )
-        .bind(device_id)
+        .bind(&device_uuid)
         .fetch_optional(&state.db)
         .await
         .map_err(internal_error)?;
@@ -149,11 +129,11 @@ pub async fn get_device_logs(
     }
 
     let logs: Vec<Log> = sqlx::query_as::<_, Log>(
-        "SELECT id, device_id, app, timestamp, duration
+        "SELECT id, device_uuid, app, timestamp, duration
          FROM logs
-         WHERE device_id = ?",
+         WHERE device_uuid = ?",
     )
-        .bind(device_id)
+        .bind(device_uuid)
         .fetch_all(&state.db)
         .await
         .map_err(internal_error)?;
@@ -167,21 +147,22 @@ async fn check() -> &'static str {
 
 
 
-async fn delete_logs_by_ids(State(state):State<AppState>,device_ref: Path<String>, Json(ids):Json<Vec<i64>>)->Result<StatusCode, (StatusCode, String)>{
-    let device_ref = device_ref.as_str();
-    let device_id: i64 = if let Ok(id) = device_ref.parse() {
-        id
-    } else {
-        sqlx::query_scalar("SELECT id FROM devices WHERE uuid = ?")
-            .bind(device_ref)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(internal_error)?
-            .ok_or((StatusCode::NOT_FOUND, "device not found".to_string()))?
-    };
+async fn delete_logs_by_ids(State(state):State<AppState>, Path(device_uuid): Path<String>, Json(ids):Json<Vec<i64>>)->Result<StatusCode, (StatusCode, String)>{
+    let exists: Option<String> = sqlx::query_scalar(
+        "SELECT uuid FROM devices WHERE uuid = ?",
+    )
+        .bind(&device_uuid)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal_error)?;
+
+    if exists.is_none() {
+        return Err((StatusCode::NOT_FOUND, "device not found".to_string()));
+    }
+
     let mut tx = state.db.begin().await.map_err(internal_error)?;
     for id in ids{
-        sqlx::query("DELETE FROM logs WHERE id = ? and device_id = ?").bind(id).bind(device_id).execute(&mut *tx).await.map_err(internal_error)?;
+        sqlx::query("DELETE FROM logs WHERE id = ? AND device_uuid = ?").bind(id).bind(&device_uuid).execute(&mut *tx).await.map_err(internal_error)?;
     }
     tx.commit().await.map_err(internal_error)?;
     Ok(StatusCode::OK)
@@ -207,8 +188,8 @@ async fn main() -> Result<()> {
         .route("/check", get(check))
         .route("/upload_logs", post(upload_logs))
         .route("/devices", get(get_devices))
-        .route("/devices/{device_id}", get(get_device_logs))
-        .route("/devices/{device_id}/logs", delete(delete_logs_by_ids))
+        .route("/devices/{device_uuid}", get(get_device_logs))
+        .route("/devices/{device_uuid}/logs", delete(delete_logs_by_ids))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         //50 MB
