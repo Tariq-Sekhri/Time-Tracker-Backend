@@ -31,6 +31,7 @@ pub struct Log{
     pub duration:i64,
 }
 
+
 pub async fn create_devices_table(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS devices (
@@ -104,6 +105,7 @@ pub async fn upload_logs(State(state): State<AppState>, Json(payload): Json<LogP
 }
 
 pub fn internal_error<E: std::fmt::Display>(err: E) -> (StatusCode, String) {
+    eprintln!("{}", err);
     (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
 }
 
@@ -192,8 +194,8 @@ async fn main() -> Result<()> {
         .route("/devices/{device_uuid}/logs", delete(delete_logs_by_ids))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
-        //50 MB
-        .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
+        //100 MB
+        .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
         .with_state(AppState { db });
     let app = Router::new().nest("/v1", app_v1);
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
