@@ -8,7 +8,8 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use crate::db::{AppState, device::Device, log::Log};
 use uuid::Uuid;
-use crate::db::device::{generate_auth_token, insert_device};
+use crate::db::device::{generate_auth_token, get_device_by_raw_token, hash_token, insert_device};
+use crate::{error, info};
 
 pub async fn check() -> &'static str {
     "Time Tracker Backend v1"
@@ -38,18 +39,17 @@ async fn register(State(state):State<AppState>,Json(pay_load):Json<RegisterPaylo
 
 #[derive(Deserialize)]
  struct LogPayload {
-     device:Device,
+     token: String,
      logs:Vec<Log>,
 }
 
-
+//
 async fn upload_all_logs(State(state): State<AppState>, Json(payload): Json<LogPayload>) -> anyhow::Result<StatusCode, (StatusCode, String)> {
     let db = &state.db;
-    let  device= payload.device;
+    let  token= payload.token;
+
+    let device = get_device_by_raw_token(db,token).await.map_err(internal_error)?;
     let  logs= payload.logs;
-
-    let a = sqlx::query("INSERT OR IGNORE INTO devices (name, uuid) VALUES (?, ?)").bind( device.name.clone()).bind(device.uuid.clone()).execute(db).await.map_err(internal_error)?;
-
     let mut tx = state.db.begin().await.map_err(internal_error)?;
     let logs_len = logs.len().clone();
     for log in logs {
@@ -133,7 +133,7 @@ pub fn v1_router(db:SqlitePool)->Router{
     Router::new()
         .route("/check", get(check))
         .route("/register", get(register))
-        .route("/upload_logs", post(upload_all_logs))
+        .route("/upload_all_logs", post(upload_all_logs))
         .route("/devices", get(get_devices))
         .route("/devices/{device_uuid}", get(get_device_logs))
         .layer(cors)
@@ -145,6 +145,6 @@ pub fn v1_router(db:SqlitePool)->Router{
 }
 
 fn internal_error<E: std::fmt::Display>(err: E) -> (StatusCode, String) {
-    eprintln!("{}", err);
+    error!("{}", err);
     (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
 }

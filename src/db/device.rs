@@ -7,6 +7,8 @@ use rand::rngs::SysRng;
 use rand::TryRng;
 use sha2::{Digest, Sha256};
 use anyhow::Result;
+use tracing_subscriber::fmt::layer;
+
 #[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
 pub struct Device {
     pub uuid: Uuid,
@@ -66,4 +68,10 @@ pub async fn create_devices_table(
 pub async fn insert_device(pool:&SqlitePool, device:Device)->Result<()>{
     sqlx::query("insert into devices (uuid, hash_token, name)  values (?, ? ,?)").bind(device.uuid).bind(device.hash_token).bind(device.name).execute(pool).await?;
     Ok(())
+}
+
+pub async fn get_device_by_raw_token(pool:&SqlitePool, token:String)->Result<Device>{
+    let hash = hash_token(&token);
+    let device= sqlx::query_as("select * from devices where hash_token=?").bind(hash).fetch_one(pool).await?;
+    Ok (device)
 }
