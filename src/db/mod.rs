@@ -9,7 +9,7 @@ use crate::db::log::create_log_table;
 pub static  DATABASE_URL:&str ="sqlite://server.db";
 #[derive(Clone)]
 pub struct AppState {
-    pub db: SqlitePool,
+    pub pool: SqlitePool,
 }
 
 

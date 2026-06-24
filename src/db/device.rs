@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use sqlx::{Encode, FromRow, SqlitePool};
+use sqlx::{FromRow, SqlitePool};
 use uuid::Uuid;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -74,4 +74,9 @@ pub async fn get_device_by_raw_token(pool:&SqlitePool, token:String)->Result<Dev
     let hash = hash_token(&token);
     let device= sqlx::query_as("select * from devices where hash_token=?").bind(hash).fetch_one(pool).await?;
     Ok (device)
+}
+
+pub async fn update_last_sync_id(pool:&SqlitePool, hash_token:String, new_id:i64  )->Result<()>{
+    sqlx::query("update devices set last_sync_id = ? where uuid = ?").bind(new_id).bind(hash_token).execute(pool).await?;
+    Ok(())
 }
