@@ -5,12 +5,12 @@ use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tower_http::cors::{Any, CorsLayer};
-use tower_http::trace::TraceLayer;
 use crate::db::{AppState, device::Device, log::Log};
 use uuid::Uuid;
 use crate::db::device::{generate_auth_token, get_device_by_raw_token, insert_device, update_last_sync_id, PubDevice};
 use crate::{error, info};
-use anyhow::{ Result};
+use anyhow::Result;
+use sqlx::Error as SqlxError;
 
 pub async fn check() -> &'static str {
     "Time Tracker Backend v1"
@@ -27,9 +27,11 @@ struct RegisterReturn{
 }
 
 async fn register(State(state):State<AppState>,Json(pay_load):Json<RegisterPayload>)->Result<(StatusCode,Json<RegisterReturn>), (StatusCode, String)>{
+    info!("Register request for device name={}", pay_load.name);
     let token = generate_auth_token().map_err(internal_error)?;
     let new_device = Device::new(pay_load.name, &token).map_err(internal_error)?;
     insert_device(&state.pool, new_device.clone()).await.map_err(internal_error)?;
+    info!("Registered device uuid={} name={}", new_device.uuid, new_device.name);
     Ok((StatusCode::OK, Json(RegisterReturn{
         uuid: new_device.uuid,
         token,
@@ -46,19 +48,17 @@ async fn register(State(state):State<AppState>,Json(pay_load):Json<RegisterPaylo
 
 
 async fn upload_all_logs(State(state): State<AppState>, Json(payload): Json<LogPayload>) -> Result<StatusCode, (StatusCode, String)> {
-    let pool = &state.pool;
-    let  token= payload.token;
+    let device = authenticate(&state.pool, payload.token).await?;
+    let device_uuid = device.uuid.to_string();
+    let logs = payload.logs;
+    if logs.is_empty() {
+        return Err(bad_request("no logs provided"));
+    }
 
-    let device = get_device_by_raw_token(pool, token).await.map_err(internal_error)?;
-    let  logs= payload.logs;
+    let logs_len = logs.len();
+    let highest_log_id = logs.iter().map(|log| log.id).max().unwrap();
+
     let mut tx = state.pool.begin().await.map_err(internal_error)?;
-    let logs_len = logs.len().clone();
-    let highest_log_id = logs
-        .iter()
-        .map(|log| log.id)
-        .max()
-        .ok_or_else(|| internal_error("no logs"))?;
-    update_last_sync_id(pool, device.hash_token.clone(),highest_log_id).await.map_err(internal_error)?;
 
     for log in logs {
         sqlx::query(
@@ -67,17 +67,27 @@ async fn upload_all_logs(State(state): State<AppState>, Json(payload): Json<LogP
          VALUES (?, ?, ?, ?, ?)",
         )
             .bind(log.id)
-            .bind(log.device_uuid)
+            .bind(&device_uuid)
             .bind(log.app)
             .bind(log.timestamp)
             .bind(log.duration)
             .execute(&mut *tx)
-            .await.map_err(internal_error)?;
+            .await
+            .map_err(internal_error)?;
     }
+
+    update_last_sync_id(&mut *tx, &device_uuid, highest_log_id)
+        .await
+        .map_err(internal_error)?;
 
     tx.commit().await.map_err(internal_error)?;
 
-    println!("Device: {} Added {} logs", device.uuid , logs_len);
+    info!(
+        "upload_all_logs device={} inserted={} highest_log_id={}",
+        device.uuid,
+        logs_len,
+        highest_log_id
+    );
     Ok(StatusCode::OK)
 }
 
@@ -92,13 +102,15 @@ async fn sync(
     State(state): State<AppState>,
     Json(payload): Json<SyncPayload>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let pool = &state.pool;
-
-    let device = get_device_by_raw_token(pool, payload.token)
-        .await
-        .map_err(internal_error)?;
+    let device = authenticate(&state.pool, payload.token).await?;
 
     let device_uuid = device.uuid.to_string();
+    info!(
+        "sync device={} incoming_logs={} deleted_ids={}",
+        device_uuid,
+        payload.logs.len(),
+        payload.deleted_log_ids.len()
+    );
 
     let highest_log_id = payload.logs.iter().map(|log| log.id).max();
 
@@ -133,19 +145,18 @@ async fn sync(
     }
 
     if let Some(highest_log_id) = highest_log_id {
-        sqlx::query(
-            "UPDATE devices
-             SET last_sync_id = ?
-             WHERE uuid = ?",
-        )
-            .bind(highest_log_id)
-            .bind(&device_uuid)
-            .execute(&mut *tx)
+        update_last_sync_id(&mut *tx, &device_uuid, highest_log_id)
             .await
             .map_err(internal_error)?;
     }
 
     tx.commit().await.map_err(internal_error)?;
+
+    if let Some(highest_log_id) = highest_log_id {
+        info!("sync complete device={} last_sync_id={}", device_uuid, highest_log_id);
+    } else {
+        info!("sync complete device={} (no log updates)", device_uuid);
+    }
 
     Ok(StatusCode::OK)
 }
@@ -155,6 +166,7 @@ async fn sync(
 async fn get_devices(State(state): State<AppState>)-> Result<(StatusCode, Json<Vec<PubDevice>>), (StatusCode, String)> {
     let db = &state.pool;
     let devices:Vec<PubDevice> = sqlx::query_as("select name, uuid,last_sync_id from devices").fetch_all(db).await.map_err(internal_error)?;
+    info!("get_devices returned {} device(s)", devices.len());
     Ok((StatusCode::OK, Json(devices)))
 }
 async fn get_device_logs(
@@ -170,6 +182,7 @@ async fn get_device_logs(
         .map_err(internal_error)?;
 
     if exists.is_none() {
+        error!("get_device_logs device={} not found", device_uuid);
         return Err((StatusCode::NOT_FOUND, "device not found".to_string()));
     }
 
@@ -178,11 +191,12 @@ async fn get_device_logs(
          FROM logs
          WHERE device_uuid = ?",
     )
-        .bind(device_uuid)
+        .bind(&device_uuid)
         .fetch_all(&state.pool)
         .await
         .map_err(internal_error)?;
 
+    info!("get_device_logs device={} returned {} log(s)", device_uuid, logs.len());
     Ok((StatusCode::OK, Json(logs)))
 }
 
@@ -208,14 +222,30 @@ pub fn v1_router(db:SqlitePool)->Router{
         .route("/devices", get(get_devices))
         .route("/devices/{device_uuid}", get(get_device_logs))
         .layer(cors)
-        .layer(TraceLayer::new_for_http())
-        //100 MB
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
         .with_state(AppState { pool: db })
 
 }
 
 fn internal_error<E: std::fmt::Display>(err: E) -> (StatusCode, String) {
-    error!("{}", err);
+    error!("internal server error: {}", err);
     (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
+}
+
+fn bad_request(message: &str) -> (StatusCode, String) {
+    error!("bad request: {}", message);
+    (StatusCode::BAD_REQUEST, message.to_string())
+}
+
+async fn authenticate(pool: &SqlitePool, token: String) -> Result<Device, (StatusCode, String)> {
+    get_device_by_raw_token(pool, token)
+        .await
+        .map_err(|err| {
+            if matches!(err, SqlxError::RowNotFound) {
+                error!("invalid auth token");
+                (StatusCode::UNAUTHORIZED, "invalid token".to_string())
+            } else {
+                internal_error(err)
+            }
+        })
 }
