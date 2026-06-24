@@ -7,12 +7,17 @@ use rand::rngs::SysRng;
 use rand::TryRng;
 use sha2::{Digest, Sha256};
 use anyhow::Result;
-use tracing_subscriber::fmt::layer;
 
 #[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
 pub struct Device {
     pub uuid: Uuid,
     pub hash_token:String,
+    pub name: String,
+    pub last_sync_id:i64,
+}
+#[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
+pub struct PubDevice {
+    pub uuid: Uuid,
     pub name: String,
     pub last_sync_id:i64,
 }
@@ -24,14 +29,6 @@ impl Device {
 
         Ok(Self{uuid,hash_token,name,last_sync_id:0})
     }
-
-    fn verify_token(self, token: &str) -> bool {
-        let hash = hash_token(token);
-        constant_time_eq::constant_time_eq(hash.as_bytes(), self.hash_token.as_bytes())
-    }
-
-
-
 }
 
 
@@ -50,7 +47,7 @@ fn hash_token(token: &str) -> String {
 
 pub async fn create_devices_table(
     pool: &SqlitePool,
-) -> anyhow::Result<(), sqlx::Error> {
+) -> Result<(), sqlx::Error> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS devices (
             uuid TEXT PRIMARY KEY NOT NULL,

@@ -8,10 +8,9 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use crate::db::{AppState, device::Device, log::Log};
 use uuid::Uuid;
-use crate::db::device::{generate_auth_token, get_device_by_raw_token, insert_device, update_last_sync_id};
+use crate::db::device::{generate_auth_token, get_device_by_raw_token, insert_device, update_last_sync_id, PubDevice};
 use crate::{error, info};
-use anyhow::{anyhow, Result};
-use crate::db::log::{delete_log, insert_log};
+use anyhow::{ Result};
 
 pub async fn check() -> &'static str {
     "Time Tracker Backend v1"
@@ -45,7 +44,7 @@ async fn register(State(state):State<AppState>,Json(pay_load):Json<RegisterPaylo
      logs:Vec<Log>,
 }
 
-//
+
 async fn upload_all_logs(State(state): State<AppState>, Json(payload): Json<LogPayload>) -> Result<StatusCode, (StatusCode, String)> {
     let pool = &state.pool;
     let  token= payload.token;
@@ -68,7 +67,7 @@ async fn upload_all_logs(State(state): State<AppState>, Json(payload): Json<LogP
          VALUES (?, ?, ?, ?, ?)",
         )
             .bind(log.id)
-            .bind(&device.uuid)
+            .bind(log.device_uuid)
             .bind(log.app)
             .bind(log.timestamp)
             .bind(log.duration)
@@ -151,9 +150,11 @@ async fn sync(
     Ok(StatusCode::OK)
 }
 
-async fn get_devices(State(state): State<AppState>)-> Result<(StatusCode, Json<Vec<Device>>), (StatusCode, String)> {
+
+
+async fn get_devices(State(state): State<AppState>)-> Result<(StatusCode, Json<Vec<PubDevice>>), (StatusCode, String)> {
     let db = &state.pool;
-    let devices:Vec<Device> = sqlx::query_as("select name, uuid,last_sync_id from devices").fetch_all(db).await.map_err(internal_error)?;
+    let devices:Vec<PubDevice> = sqlx::query_as("select name, uuid,last_sync_id from devices").fetch_all(db).await.map_err(internal_error)?;
     Ok((StatusCode::OK, Json(devices)))
 }
 async fn get_device_logs(
