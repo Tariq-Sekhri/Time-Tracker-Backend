@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tower_http::cors::{Any, CorsLayer};
 use crate::db::{AppState, device::Device, log::Log};
-use uuid::Uuid;
 use crate::db::device::{generate_auth_token, get_device_by_raw_token, insert_device, update_last_sync_id, PubDevice};
 use crate::{error, info};
 use anyhow::Result;
@@ -22,7 +21,7 @@ pub async fn check() -> &'static str {
 
 #[derive(Serialize)]
 struct RegisterReturn{
-    uuid:Uuid,
+    uuid:String,
     token:String,
 }
 
@@ -49,7 +48,7 @@ async fn register(State(state):State<AppState>,Json(pay_load):Json<RegisterPaylo
 
 async fn upload_all_logs(State(state): State<AppState>, Json(payload): Json<LogPayload>) -> Result<StatusCode, (StatusCode, String)> {
     let device = authenticate(&state.pool, payload.token).await?;
-    let device_uuid = device.uuid.to_string();
+    let device_uuid = device.uuid;
     let logs = payload.logs;
     if logs.is_empty() {
         return Err(bad_request("no logs provided"));
@@ -84,7 +83,7 @@ async fn upload_all_logs(State(state): State<AppState>, Json(payload): Json<LogP
 
     info!(
         "upload_all_logs device={} inserted={} highest_log_id={}",
-        device.uuid,
+        device_uuid,
         logs_len,
         highest_log_id
     );
@@ -104,7 +103,7 @@ async fn sync(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let device = authenticate(&state.pool, payload.token).await?;
 
-    let device_uuid = device.uuid.to_string();
+    let device_uuid = device.uuid;
     info!(
         "sync device={} incoming_logs={} deleted_ids={}",
         device_uuid,
@@ -173,8 +172,8 @@ async fn get_device_logs(
     State(state): State<AppState>,
     Path(device_uuid): Path<String>,
 ) -> Result<(StatusCode, Json<Vec<Log>>), (StatusCode, String)> {
-    let exists: Option<String> = sqlx::query_scalar(
-        "SELECT uuid FROM devices WHERE uuid = ?",
+    let exists: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM devices WHERE uuid = ? LIMIT 1",
     )
         .bind(&device_uuid)
         .fetch_optional(&state.pool)
@@ -187,10 +186,7 @@ async fn get_device_logs(
     }
 
     let logs: Vec<Log> = sqlx::query_as::<_, Log>(
-        "SELECT id, device_uuid, app, timestamp, duration
-         FROM logs
-         WHERE device_uuid = ?",
-    )
+        "SELECT * FROM logs WHERE device_uuid = ?")
         .bind(&device_uuid)
         .fetch_all(&state.pool)
         .await

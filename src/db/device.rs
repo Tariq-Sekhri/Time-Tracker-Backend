@@ -10,21 +10,21 @@ use anyhow::Result;
 
 #[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
 pub struct Device {
-    pub uuid: Uuid,
+    pub uuid: String,
     pub hash_token:String,
     pub name: String,
     pub last_sync_id:i64,
 }
 #[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
 pub struct PubDevice {
-    pub uuid: Uuid,
+    pub uuid: String,
     pub name: String,
     pub last_sync_id:i64,
 }
 
 impl Device {
     pub fn new(name:String, token:&String)->Result<Self>{
-        let uuid = Uuid::new_v4();
+        let uuid = Uuid::new_v4().to_string();
         let hash_token= hash_token(&token);
 
         Ok(Self{uuid,hash_token,name,last_sync_id:0})
@@ -69,7 +69,7 @@ pub async fn insert_device(pool:&SqlitePool, device:Device)->Result<()>{
 
 pub async fn get_device_by_raw_token(pool: &SqlitePool, token: String) -> Result<Device, sqlx::Error> {
     let hash = hash_token(&token);
-    sqlx::query_as("select * from devices where hash_token=?")
+    sqlx::query_as("SELECT * FROM devices WHERE hash_token = ?")
         .bind(hash)
         .fetch_one(pool)
         .await

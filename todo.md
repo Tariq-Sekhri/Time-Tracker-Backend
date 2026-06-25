@@ -39,7 +39,9 @@ if secesed last uploaded id = newest log id -1 other wise dont
 when client deltes a log it gets added to a delte list clear delete list 
 
 
-//------------------------------ sync finished---------
+//------------------------------ upload  finished---------
+
+
 /get devices (gets called everytime we go to sync or a refresh is called)
 this lists the devices (not giving token)
 
