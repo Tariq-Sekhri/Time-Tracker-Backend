@@ -197,6 +197,28 @@ async fn get_device_logs(
 }
 
 
+async fn get_devices_logs(
+    State(state): State<AppState>,
+    Json(devices):Json<Vec<PubDevice>>
+) -> Result<(StatusCode, Json<Vec<Log>>), (StatusCode, String)> {
+    let mut logs:Vec<Log> = vec![];
+    for device in &devices{
+
+
+        logs.extend(sqlx::query_as::<_, Log>(
+        "SELECT * FROM logs WHERE device_uuid = ? and id > ?")
+        .bind(&device.uuid)
+        .bind(&device.last_sync_id)
+        .fetch_all(&state.pool)
+        .await
+        .map_err(internal_error)?);
+    }
+
+    info!("get_device_logs devices={:?} returned {} log(s)",devices.into_iter().map(|device| device.name), logs.len());
+    Ok((StatusCode::OK, Json(logs)))
+}
+
+
 
 //check  -. v1
 // registier (name)=> token and uuid
@@ -216,6 +238,7 @@ pub fn v1_router(db:SqlitePool)->Router{
         .route("/upload_all_logs", post(upload_all_logs))
         .route("/sync", post(sync))
         .route("/devices", get(get_devices))
+        .route("/devices/", get(get_devices_logs))
         .route("/devices/{device_uuid}", get(get_device_logs))
         .layer(cors)
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
