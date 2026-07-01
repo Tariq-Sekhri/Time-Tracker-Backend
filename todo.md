@@ -3,4 +3,5 @@
 - delete device cascade 
 - logs are encpipted 
 - server sends to sync client deleted logs by other devices
+- deleteing a device should be told to client
 
