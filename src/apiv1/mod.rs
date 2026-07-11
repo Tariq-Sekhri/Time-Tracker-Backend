@@ -220,12 +220,6 @@ async fn get_devices_logs(
 
 
 
-//check  -. v1
-// registier (name)=> token and uuid
-// push_all_logs (deivce, logs)=> last sync log id
-// sync (device, logs, delete logs id)-> last sync log id
-// get devices () devices uuid and name
-// get logs/deivce_uuid
 
 pub fn v1_router(db:SqlitePool)->Router{
     let cors = CorsLayer::new()

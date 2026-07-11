@@ -1,5 +1,6 @@
 mod db;
 mod apiv1;
+mod admin;
 mod log;
 
 use axum::{Router};
@@ -8,8 +9,9 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use anyhow::Result;
 
+use crate::admin::router as admin_router;
 use crate::apiv1::v1_router;
-use crate::db::{check_state, DATABASE_URL};
+use crate::db::{check_state, AppState, DATABASE_URL};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -27,12 +29,15 @@ async fn main() -> Result<()> {
     check_state(&db).await?;
     info!("Database schema verified");
 
-    let app_v1 = v1_router(db);
-    let app = Router::new().nest("/v1", app_v1);
+    let app_state = AppState { pool: db };
+    let app = Router::new()
+        .nest("/v1", v1_router(app_state.pool.clone()))
+        .nest("/admin", admin_router(app_state));
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!("Listening on http://{}", addr);
+    info!("Admin panel: http://localhost:3000/admin");
 
     axum::serve(listener, app).await?;
     Ok(())
