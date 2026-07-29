@@ -1,7 +1,7 @@
 module.exports = {
     apps: [
         {
-            name: "time-tracker-backend",
+            name: "ttb",
             script: "./target/release/Time-Tracker-Backend.exe",
             cwd: __dirname,
             interpreter: "none",
