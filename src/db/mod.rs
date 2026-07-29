@@ -3,7 +3,7 @@ pub mod device;
 
 
 use sqlx::{SqlitePool};
-use crate::db::device::create_devices_table;
+use crate::db::device::{create_devices_table, ensure_devices_schema};
 use crate::db::log::{create_log_table, ensure_logs_schema};
 
 pub static  DATABASE_URL:&str ="sqlite://server.db";
@@ -15,6 +15,7 @@ pub struct AppState {
 
 pub async fn check_state(pool: &SqlitePool)-> anyhow::Result<()> {
     create_devices_table(pool).await?;
+    ensure_devices_schema(pool).await?;
     create_log_table(pool).await?;
     ensure_logs_schema(pool).await?;
     Ok(())
