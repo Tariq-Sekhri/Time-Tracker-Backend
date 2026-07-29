@@ -43,10 +43,10 @@ async fn main() -> Result<()> {
         .nest("/v1", v1_router(app_state.pool.clone()))
         .nest("/admin", admin_router(app_state, admin_password));
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
+    let addr = SocketAddr::from(([0, 0, 0, 0], 8765));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!("Listening on http://{}", addr);
-    info!("Admin panel: http://localhost:3000/admin");
+    info!("Admin panel: http://localhost:8765/admin");
 
     axum::serve(listener, app).await?;
     Ok(())

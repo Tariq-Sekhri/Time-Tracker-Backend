@@ -19,6 +19,6 @@ pm2 start ecosystem.config.cjs
 pm2 restart time-tracker-backend --update-env
 ```
 
-Open `http://<server-ip>:3000/admin` and sign in. New and existing device
+Open `http://<server-ip>:8765/admin` and sign in. New and existing device
 registrations remain inactive until an admin activates them from the Devices
 page.
