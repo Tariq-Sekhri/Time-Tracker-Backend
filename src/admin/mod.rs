@@ -7,6 +7,7 @@ use axum::{Form, Router};
 use constant_time_eq::constant_time_eq;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use chrono::{DateTime, Local, Utc};
 
 use crate::db::device::{generate_auth_token, PubDevice};
 use crate::db::log::Log;
@@ -15,6 +16,7 @@ use crate::{error, info};
 
 const LOG_LIST_LIMIT: i64 = 2000;
 const ADMIN_COOKIE_NAME: &str = "time_tracker_admin";
+const ADMIN_COOKIE_MAX_AGE_SECONDS: u32 = 60 * 60 * 24 * 30;
 
 #[derive(Clone)]
 struct AdminAuthState {
@@ -22,10 +24,11 @@ struct AdminAuthState {
     session_token: String,
 }
 
-pub fn router(state: AppState, admin_password: String) -> Router {
+pub async fn router(state: AppState, admin_password: String) -> Result<Router, sqlx::Error> {
     let auth_state = AdminAuthState {
         password_hash: Sha256::digest(admin_password.as_bytes()).into(),
-        session_token: generate_auth_token().expect("OS randomness must be available"),
+        session_token: load_or_create_session_token(&state.pool)
+            .await?,
     };
 
     let protected = Router::new()
@@ -45,10 +48,35 @@ pub fn router(state: AppState, admin_password: String) -> Router {
             require_admin,
         ));
 
-    Router::new()
+    Ok(Router::new()
         .route("/login", get(login_page).post(login))
         .with_state(auth_state)
-        .merge(protected)
+        .merge(protected))
+}
+
+async fn load_or_create_session_token(pool: &sqlx::SqlitePool) -> Result<String, sqlx::Error> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS admin_session (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            token TEXT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    if let Some(token) = sqlx::query_scalar("SELECT token FROM admin_session WHERE id = 1")
+        .fetch_optional(pool)
+        .await?
+    {
+        return Ok(token);
+    }
+
+    let token = generate_auth_token().expect("OS randomness must be available");
+    sqlx::query("INSERT INTO admin_session (id, token) VALUES (1, ?)")
+        .bind(&token)
+        .execute(pool)
+        .await?;
+    Ok(token)
 }
 
 async fn require_admin(
@@ -100,8 +128,8 @@ async fn login(
 
     let mut response = Redirect::to("/admin/devices").into_response();
     let cookie = format!(
-        "{ADMIN_COOKIE_NAME}={}; Path=/admin; HttpOnly; SameSite=Strict",
-        auth.session_token
+        "{ADMIN_COOKIE_NAME}={}; Path=/admin; HttpOnly; SameSite=Strict; Max-Age={ADMIN_COOKIE_MAX_AGE_SECONDS}",
+        auth.session_token,
     );
     response.headers_mut().insert(
         header::SET_COOKIE,
@@ -127,8 +155,12 @@ async fn admin_index() -> impl IntoResponse {
 
 async fn list_devices(State(state): State<AppState>) -> Result<Html<String>, (StatusCode, String)> {
     let devices: Vec<PubDevice> = sqlx::query_as(
-        "SELECT uuid, name, last_sync_id, is_active
-         FROM devices ORDER BY is_active ASC, name ASC"
+        "SELECT devices.uuid, devices.name, devices.last_sync_id,
+                (SELECT timestamp FROM logs
+                 WHERE logs.device_uuid = devices.uuid AND logs.id = devices.last_sync_id)
+                    AS last_log_received_at,
+                devices.is_active
+         FROM devices ORDER BY devices.is_active ASC, devices.name ASC"
     )
         .fetch_all(&state.pool)
         .await
@@ -153,11 +185,12 @@ async fn list_devices(State(state): State<AppState>) -> Result<Html<String>, (St
             )
         };
         rows.push_str(&format!(
-            "<tr><td><strong>{}</strong><div class=\"uuid\">{}</div></td><td>{}</td><td>{}</td><td class=\"actions\">{}<a href=\"/admin/devices/{}\">Manage</a></td></tr>",
+            "<tr><td><strong>{}</strong><div class=\"uuid\">{}</div></td><td>{}</td><td>{}</td><td>{}</td><td class=\"actions\">{}<a href=\"/admin/devices/{}\">Manage</a></td></tr>",
             esc(&d.name),
             esc(&d.uuid),
             status,
             d.last_sync_id,
+            format_log_received_at(d.last_log_received_at),
             action,
             esc(&d.uuid),
         ));
@@ -170,7 +203,7 @@ async fn list_devices(State(state): State<AppState>) -> Result<Html<String>, (St
         &format!(
             "<div class=\"title-row\"><div><h1>Device approvals</h1><p>{} waiting · {} total</p></div></div>\
             <table>\
-            <tr><th>Device</th><th>Status</th><th>Last sync ID</th><th>Actions</th></tr>\
+            <tr><th>Device</th><th>Status</th><th>Last sync ID</th><th>Last log received</th><th>Actions</th></tr>\
             {rows}\
             </table>",
             pending_count,
@@ -184,7 +217,12 @@ async fn edit_device_page(
     Path(uuid): Path<String>,
 ) -> Result<Html<String>, (StatusCode, String)> {
     let device: PubDevice = sqlx::query_as(
-        "SELECT uuid, name, last_sync_id, is_active FROM devices WHERE uuid = ?",
+        "SELECT devices.uuid, devices.name, devices.last_sync_id,
+                (SELECT timestamp FROM logs
+                 WHERE logs.device_uuid = devices.uuid AND logs.id = devices.last_sync_id)
+                    AS last_log_received_at,
+                devices.is_active
+         FROM devices WHERE devices.uuid = ?",
     )
     .bind(&uuid)
     .fetch_optional(&state.pool)
@@ -197,6 +235,7 @@ async fn edit_device_page(
         &format!(
             "<h1>Manage device</h1>\
             <p>Status: {}</p>\
+            <p>Last log received: {}</p>\
             <form method=\"post\" action=\"/admin/devices/{}/{}\">\
             <button type=\"submit\">{}</button>\
             </form>\
@@ -210,6 +249,7 @@ async fn edit_device_page(
             </form>\
             <p><a href=\"/admin/logs?device_uuid={}\">View logs for this device</a></p>",
             if device.is_active { "Active" } else { "Waiting for approval" },
+            format_log_received_at(device.last_log_received_at),
             esc(&device.uuid),
             if device.is_active { "deactivate" } else { "activate" },
             if device.is_active { "Deactivate" } else { "Activate" },
@@ -220,6 +260,18 @@ async fn edit_device_page(
             esc(&device.uuid),
         ),
     )))
+}
+
+fn format_log_received_at(timestamp: Option<i64>) -> String {
+    timestamp
+        .and_then(|seconds| DateTime::<Utc>::from_timestamp(seconds, 0))
+        .map(|date_time| {
+            date_time
+                .with_timezone(&Local)
+                .format("%Y-%m-%d %I:%M:%S %p")
+                .to_string()
+        })
+        .unwrap_or_else(|| "No logs received".to_string())
 }
 
 async fn activate_device(
@@ -618,6 +670,20 @@ mod tests {
             .await
             .unwrap();
         assert!(active);
+    }
+
+    #[tokio::test]
+    async fn admin_session_token_survives_router_recreation() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+
+        let first = load_or_create_session_token(&pool).await.unwrap();
+        let second = load_or_create_session_token(&pool).await.unwrap();
+
+        assert_eq!(first, second);
     }
 
     #[test]

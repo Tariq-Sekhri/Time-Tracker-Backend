@@ -14,13 +14,18 @@ pub struct Device {
     pub hash_token:String,
     pub name: String,
     pub last_sync_id:i64,
+    pub last_log_received_at: Option<i64>,
     pub is_active: bool,
+    /// Reserved for the local Codex integration. Normal tracker devices can
+    /// never use the AI data-export endpoint.
+    pub is_ai_assistant: bool,
 }
 #[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
 pub struct PubDevice {
     pub uuid: String,
     pub name: String,
     pub last_sync_id:i64,
+    pub last_log_received_at: Option<i64>,
     pub is_active: bool,
 }
 
@@ -29,7 +34,7 @@ impl Device {
         let uuid = Uuid::new_v4().to_string();
         let hash_token= hash_token(&token);
 
-        Ok(Self{uuid,hash_token,name,last_sync_id:0,is_active:false})
+        Ok(Self{uuid,hash_token,name,last_sync_id:0,last_log_received_at:None,is_active:false,is_ai_assistant:false})
     }
 }
 
@@ -56,7 +61,9 @@ pub async fn create_devices_table(
             hash_token TEXT NOT NULL,
             name TEXT NOT NULL,
             last_sync_id INTEGER NOT NULL DEFAULT 0,
-            is_active INTEGER NOT NULL DEFAULT 0
+            last_log_received_at INTEGER,
+            is_active INTEGER NOT NULL DEFAULT 0,
+            is_ai_assistant INTEGER NOT NULL DEFAULT 0
         )",
     )
         .execute(pool)
@@ -71,6 +78,16 @@ pub async fn ensure_devices_schema(pool: &SqlitePool) -> Result<(), sqlx::Error>
         .await?;
     if !columns.iter().any(|column| column == "is_active") {
         sqlx::query("ALTER TABLE devices ADD COLUMN is_active INTEGER NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await?;
+    }
+    if !columns.iter().any(|column| column == "last_log_received_at") {
+        sqlx::query("ALTER TABLE devices ADD COLUMN last_log_received_at INTEGER")
+            .execute(pool)
+            .await?;
+    }
+    if !columns.iter().any(|column| column == "is_ai_assistant") {
+        sqlx::query("ALTER TABLE devices ADD COLUMN is_ai_assistant INTEGER NOT NULL DEFAULT 0")
             .execute(pool)
             .await?;
     }
@@ -109,6 +126,19 @@ where
         .bind(device_uuid)
         .execute(executor)
         .await?;
+    Ok(())
+}
+
+pub async fn mark_log_received<'e, E>(executor: E, device_uuid: &str) -> Result<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    sqlx::query(
+        "UPDATE devices SET last_log_received_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE uuid = ?",
+    )
+    .bind(device_uuid)
+    .execute(executor)
+    .await?;
     Ok(())
 }
 

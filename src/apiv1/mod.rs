@@ -1,4 +1,4 @@
-use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::{Json, Router};
 use axum::routing::{get, post};
@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tower_http::cors::{Any, CorsLayer};
 use crate::db::{AppState, device::Device, log::Log};
-use crate::db::device::{generate_auth_token, get_device_by_raw_token, insert_device, update_last_sync_id, PubDevice};
+use crate::db::device::{generate_auth_token, get_device_by_raw_token, insert_device, mark_log_received, update_last_sync_id, PubDevice};
 use crate::{error, info};
 use anyhow::Result;
 use sqlx::Error as SqlxError;
@@ -84,6 +84,9 @@ async fn upload_all_logs(State(state): State<AppState>, Json(payload): Json<LogP
     update_last_sync_id(&mut *tx, &device_uuid, highest_log_id)
         .await
         .map_err(internal_error)?;
+    mark_log_received(&mut *tx, &device_uuid)
+        .await
+        .map_err(internal_error)?;
 
     tx.commit().await.map_err(internal_error)?;
 
@@ -157,6 +160,9 @@ async fn sync(
         update_last_sync_id(&mut *tx, &device_uuid, highest_log_id)
             .await
             .map_err(internal_error)?;
+        mark_log_received(&mut *tx, &device_uuid)
+            .await
+            .map_err(internal_error)?;
     }
 
     tx.commit().await.map_err(internal_error)?;
@@ -179,7 +185,7 @@ async fn get_devices(
     authenticate_active_bearer(&state.pool, &headers).await?;
     let db = &state.pool;
     let devices:Vec<PubDevice> = sqlx::query_as(
-        "select name, uuid, last_sync_id, is_active from devices where is_active = 1"
+        "select name, uuid, last_sync_id, last_log_received_at, is_active from devices where is_active = 1"
     ).fetch_all(db).await.map_err(internal_error)?;
     info!("get_devices returned {} device(s)", devices.len());
     Ok((StatusCode::OK, Json(devices)))
@@ -241,7 +247,70 @@ async fn get_devices_logs(
 }
 
 
+/// A raw, filtered activity block. `start` and `end` use Unix seconds and the
+/// end boundary is exclusive, so adjacent date-range requests do not duplicate
+/// blocks.
+#[derive(Deserialize)]
+struct AiTimeBlocksQuery {
+    start: i64,
+    end: i64,
+    device_uuid: Option<String>,
+    app_contains: Option<String>,
+}
 
+#[derive(Serialize, sqlx::FromRow)]
+struct AiTimeBlock {
+    device_uuid: String,
+    device_name: String,
+    app: String,
+    started_at: i64,
+    duration_seconds: i64,
+}
+
+/// Private export for the local Codex assistant. It requires a separately
+/// marked AI device token; ordinary approved devices are refused.
+async fn get_ai_time_blocks(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<AiTimeBlocksQuery>,
+) -> Result<Json<Vec<AiTimeBlock>>, (StatusCode, String)> {
+    authenticate_ai_assistant_bearer(&state.pool, &headers).await?;
+    if query.end <= query.start {
+        return Err(bad_request("end must be greater than start"));
+    }
+    const MAX_BLOCKS: i64 = 100_000;
+    let device_uuid = query.device_uuid.unwrap_or_default();
+    let app_contains = query.app_contains.unwrap_or_default();
+    let blocks = sqlx::query_as::<_, AiTimeBlock>(
+        "SELECT logs.device_uuid,
+                devices.name AS device_name,
+                logs.app,
+                logs.timestamp AS started_at,
+                logs.duration AS duration_seconds
+         FROM logs
+         JOIN devices ON devices.uuid = logs.device_uuid
+         WHERE devices.is_active = 1
+           AND logs.timestamp >= ?
+           AND logs.timestamp < ?
+           AND (? = '' OR logs.device_uuid = ?)
+           AND (? = '' OR instr(lower(logs.app), lower(?)) > 0)
+         ORDER BY logs.timestamp ASC, logs.device_uuid ASC, logs.id ASC
+         LIMIT ?",
+    )
+    .bind(query.start)
+    .bind(query.end)
+    .bind(&device_uuid)
+    .bind(&device_uuid)
+    .bind(&app_contains)
+    .bind(&app_contains)
+    .bind(MAX_BLOCKS)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    info!("ai_time_blocks start={} end={} returned={}", query.start, query.end, blocks.len());
+    Ok(Json(blocks))
+}
 
 pub fn v1_router(db:SqlitePool)->Router{
     let cors = CorsLayer::new()
@@ -257,6 +326,7 @@ pub fn v1_router(db:SqlitePool)->Router{
         .route("/devices", get(get_devices))
         .route("/devices/", get(get_devices_logs))
         .route("/devices/{device_uuid}", get(get_device_logs))
+        .route("/ai/time-blocks", get(get_ai_time_blocks))
         .layer(cors)
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
         .with_state(AppState { pool: db })
@@ -309,6 +379,18 @@ async fn authenticate_active_bearer(
         .filter(|token| !token.is_empty())
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "missing bearer token".to_string()))?;
     authenticate_active(pool, token.to_string()).await
+}
+
+async fn authenticate_ai_assistant_bearer(
+    pool: &SqlitePool,
+    headers: &HeaderMap,
+) -> Result<Device, (StatusCode, String)> {
+    let device = authenticate_active_bearer(pool, headers).await?;
+    if !device.is_ai_assistant {
+        error!("non-AI device attempted local AI export uuid={}", device.uuid);
+        return Err((StatusCode::FORBIDDEN, "AI assistant token required".to_string()));
+    }
+    Ok(device)
 }
 
 #[derive(Deserialize)]
@@ -367,7 +449,7 @@ mod tests {
              VALUES (?, ?, 'Editor', 100, 15)",
         )
         .bind(id)
-        .bind(uuid)
+        .bind(&uuid)
         .execute(&state.pool)
         .await
         .unwrap();
@@ -425,11 +507,20 @@ mod tests {
         let duration: i64 = sqlx::query_scalar(
             "SELECT duration FROM logs WHERE device_uuid = ? AND id = 7",
         )
-        .bind(uuid)
+        .bind(&uuid)
         .fetch_one(&state.pool)
         .await
         .unwrap();
         assert_eq!(duration, 45);
+
+        let last_log_received_at: Option<i64> = sqlx::query_scalar(
+            "SELECT last_log_received_at FROM devices WHERE uuid = ?",
+        )
+        .bind(uuid)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+        assert!(last_log_received_at.is_some());
     }
 
     #[tokio::test]

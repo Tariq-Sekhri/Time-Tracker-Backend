@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
     let app_state = AppState { pool: db };
     let app = Router::new()
         .nest("/v1", v1_router(app_state.pool.clone()))
-        .nest("/admin", admin_router(app_state, admin_password));
+        .nest("/admin", admin_router(app_state, admin_password).await?);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 8765));
     let listener = tokio::net::TcpListener::bind(addr).await?;
