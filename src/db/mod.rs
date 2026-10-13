@@ -1,5 +1,6 @@
 pub mod log;
 pub mod device;
+pub mod afk;
 
 
 use sqlx::{SqlitePool};
@@ -18,5 +19,6 @@ pub async fn check_state(pool: &SqlitePool)-> anyhow::Result<()> {
     ensure_devices_schema(pool).await?;
     create_log_table(pool).await?;
     ensure_logs_schema(pool).await?;
+    afk::ensure_schema(pool).await?;
     Ok(())
 }

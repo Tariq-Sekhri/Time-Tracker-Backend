@@ -1,4 +1,5 @@
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
+mod afk;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::{Json, Router};
 use axum::routing::{get, post};
@@ -323,6 +324,8 @@ pub fn v1_router(db:SqlitePool)->Router{
         .route("/status", post(device_status))
         .route("/upload_all_logs", post(upload_all_logs))
         .route("/sync", post(sync))
+        .route("/afk", post(afk::upload))
+        .route("/afk/{device_uuid}", get(afk::download))
         .route("/devices", get(get_devices))
         .route("/devices/", get(get_devices_logs))
         .route("/devices/{device_uuid}", get(get_device_logs))
