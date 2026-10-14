@@ -359,3 +359,98 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod websocket_tests {
+    use super::*;
+    use crate::db::{
+        check_state,
+        device::{Device, insert_device},
+    };
+    use futures_util::StreamExt;
+    use sqlx::sqlite::SqlitePoolOptions;
+    use tokio_tungstenite::tungstenite::{self, client::IntoClientRequest};
+
+    async fn next_text(
+        socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> serde_json::Value {
+        loop {
+            let message = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            if let tungstenite::Message::Text(text) = message {
+                return serde_json::from_str(text.as_str()).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn websocket_sends_current_timer_then_live_changes() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        check_state(&pool).await.unwrap();
+        insert_device(&pool, Device::new("phone".into(), &"ws-token".into()).unwrap())
+            .await
+            .unwrap();
+        sqlx::query("UPDATE devices SET is_active=1").execute(&pool).await.unwrap();
+        let state = AppState { pool: pool.clone() };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().nest("/v1", super::super::v1_router(pool));
+        tokio::spawn(axum::serve(listener, app).into_future());
+
+        let url = format!("ws://{addr}/v1/ws");
+        let refused = tokio_tungstenite::connect_async(url.as_str()).await.unwrap_err();
+        assert!(matches!(&refused, tungstenite::Error::Http(r) if r.status() == 401), "{refused:?}");
+
+        let mut request = url.as_str().into_client_request().unwrap();
+        request.headers_mut().insert("Authorization", "Bearer ws-token".parse().unwrap());
+        let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        assert_eq!(next_text(&mut socket).await, json!({"type": "timer", "timer": null}));
+
+        let session = "websocket-session";
+        let timer = Timer {
+            session_id: session.into(),
+            title: "Live".into(),
+            project_name: None,
+            start_time: 100,
+            version: 0,
+            device_uuid: String::new(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("Authorization", "Bearer ws-token".parse().unwrap());
+        let _ = put_timer(State(state.clone()), headers.clone(), Json(timer)).await.unwrap();
+        // Other tests share the broadcast channel; wait for this session's events.
+        let started = loop {
+            let event = next_text(&mut socket).await;
+            if event["timer"]["session_id"] == session {
+                break event;
+            }
+        };
+        assert_eq!(started["timer"]["title"], "Live");
+
+        let entry = Entry {
+            id: 0,
+            session_id: session.into(),
+            title: "Live".into(),
+            project_name: None,
+            start_time: 100,
+            end_time: 200,
+            device_uuid: String::new(),
+        };
+        let _ = finish(State(state), headers, Json(entry)).await.unwrap();
+        loop {
+            let event = next_text(&mut socket).await;
+            if event["type"] == "entry" && event["entry"]["session_id"] == session {
+                break;
+            }
+        }
+    }
+}
