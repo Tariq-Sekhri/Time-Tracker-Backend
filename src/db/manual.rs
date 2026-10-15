@@ -43,10 +43,13 @@ pub enum PutTimer {
     Conflict(Timer),
 }
 
+/// Subcategories sync as "Parent › Child", two 100-character names joined by " › ".
+pub const MAX_PROJECT_NAME_CHARS: usize = 203;
+
 pub fn valid_text(title: &str, project: Option<&str>) -> bool {
     title.chars().count() <= 200
         && !title.chars().any(char::is_control)
-        && project.is_none_or(|p| !p.trim().is_empty() && p.chars().count() <= 100)
+        && project.is_none_or(|p| !p.trim().is_empty() && p.chars().count() <= MAX_PROJECT_NAME_CHARS)
 }
 
 pub fn valid_session(session_id: &str) -> bool {

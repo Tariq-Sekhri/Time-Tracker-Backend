@@ -131,7 +131,7 @@ pub(super) async fn put_projects(
     authenticate_active_bearer(&state.pool, &headers).await?;
     if projects.len() > 1000
         || projects.iter().any(|p| {
-            p.name.trim().is_empty() || p.name.chars().count() > 100 || !manual::valid_color(&p.color)
+            p.name.trim().is_empty() || p.name.chars().count() > manual::MAX_PROJECT_NAME_CHARS || !manual::valid_color(&p.color)
         })
     {
         return Err(bad_request("invalid manual projects"));
@@ -350,6 +350,10 @@ mod tests {
             .unwrap();
         let projects = get_projects(State(state.clone()), headers(&token)).await.unwrap().0;
         assert_eq!(projects, vec![project("client", "#112233"), project("Home", "#000000")]);
+        let subcategory = format!("{} › {}", "a".repeat(100), "b".repeat(100));
+        put_projects(State(state.clone()), headers(&token), Json(vec![project(&subcategory, "#000000")]))
+            .await
+            .unwrap();
         assert_eq!(
             put_projects(State(state), headers(&token), Json(vec![project("x", "red")]))
                 .await
