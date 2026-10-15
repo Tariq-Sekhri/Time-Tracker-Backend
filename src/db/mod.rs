@@ -2,6 +2,7 @@ pub mod log;
 pub mod device;
 pub mod afk;
 pub mod manual;
+pub mod notes;
 
 
 use sqlx::{SqlitePool};
@@ -22,5 +23,6 @@ pub async fn check_state(pool: &SqlitePool)-> anyhow::Result<()> {
     ensure_logs_schema(pool).await?;
     afk::ensure_schema(pool).await?;
     manual::ensure_schema(pool).await?;
+    notes::ensure_schema(pool).await?;
     Ok(())
 }

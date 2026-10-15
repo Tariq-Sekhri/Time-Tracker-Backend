@@ -1,6 +1,7 @@
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 mod afk;
 mod manual;
+mod notes;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::{Json, Router};
 use axum::routing::{get, post};
@@ -336,6 +337,7 @@ pub fn v1_router(db:SqlitePool)->Router{
         .route("/devices/{device_uuid}", get(get_device_logs))
         .route("/ai/time-blocks", get(get_ai_time_blocks))
         .layer(cors)
+        .route("/notes", get(notes::download).post(notes::upload))
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
         .with_state(AppState { pool: db })
 
